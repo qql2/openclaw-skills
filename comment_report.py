@@ -150,41 +150,95 @@ def publish_to_repo(html, filename, bvid):
     raw = f"https://raw.githubusercontent.com/qql2/bilibili-tools/{sha}/reports/{filename}"
     return f"https://htmlpreview.github.io/?{raw}"
 
+def resolve_arguments(data: dict, analysis: dict) -> list:
+    """将 LLM 分析的论点（含 comment_ids）合并到评论数据中，返回完整 arguments 列表"""
+    comments_map = {c["id"]: c for c in data["comments"]}
+    arguments = []
+    for a in analysis.get("arguments", []):
+        resolved = {
+            "title": a["title"],
+            "summary": a["summary"],
+            "comments": []
+        }
+        for cid in a.get("comment_ids", []):
+            c = comments_map.get(cid)
+            if c:
+                resolved["comments"].append(c)
+            else:
+                print(f"⚠️ 论点「{a['title']}」引用了不存在的评论 id={cid}，已跳过", file=sys.stderr)
+        arguments.append(resolved)
+    return arguments
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="B站评论观点分析报告工具")
     parser.add_argument("bvid", nargs="?", help="BVID 或视频URL")
     parser.add_argument("--count", type=int, default=60, help="拉取评论数")
     parser.add_argument("--gen-report", action="store_true",
-                        help="生成并发布 HTML 报告：从 stdin 读取分析结果 JSON，输出预览链接")
+                        help="生成并发布 HTML 报告：从 stdin 读取论点分析 JSON，自动合并评论数据")
+    parser.add_argument("--analysis", type=str,
+                        help="论点分析 JSON 文件路径（与 --gen-report 配合使用）")
+    parser.add_argument("--data", type=str,
+                        help="评论数据 JSON 文件路径（与 --gen-report 配合使用）")
     args = parser.parse_args()
 
     if args.gen_report:
-        # --gen-report 模式：从 stdin 读取分析结果 JSON
-        raw = sys.stdin.read()
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as e:
-            context = raw[max(0, e.pos-60):e.pos+60]
-            print(f"❌ --gen-report 输入的 JSON 解析失败（行 {e.lineno} 列 {e.colno}）", file=sys.stderr)
-            print(f"  常见原因：中文引号用了 ASCII 双引号「\"」而非 JSON 字符串的转义格式", file=sys.stderr)
-            print(f"  解决：使用 Python json.dumps(ensure_ascii=False) 构建 JSON，不要手写", file=sys.stderr)
-            print(f"  --- 错误位置上下文 ---", file=sys.stderr)
-            print(f"  {context}", file=sys.stderr)
-            print(f"  ---", file=sys.stderr)
+        # 读取 LLM 分析的论点结构（只含 title + summary + comment_ids）
+        if args.analysis:
+            with open(args.analysis) as f:
+                analysis = json.load(f)
+        else:
+            raw = sys.stdin.read()
+            try:
+                analysis = json.loads(raw)
+            except json.JSONDecodeError as e:
+                context = raw[max(0, e.pos-60):e.pos+60]
+                print(f"❌ 论点 JSON 解析失败（行 {e.lineno} 列 {e.colno}）", file=sys.stderr)
+                print(f"  --- 错误位置上下文 ---", file=sys.stderr)
+                print(f"  {context}", file=sys.stderr)
+                print(f"  ---", file=sys.stderr)
+                sys.exit(1)
+
+        # 读取评论数据（来自 Step 3 的结构化 JSON）
+        data_file = args.data
+        if not data_file:
+            # 推测路径：同目录下以 BVID 命名的 .data.json
+            bvid = analysis.get("bvid", "")
+            if bvid:
+                data_file = os.path.join(os.path.dirname(args.analysis or "/tmp"), f"{bvid}.data.json")
+            if not data_file or not os.path.exists(data_file):
+                # 兜底：从 /tmp 找
+                for f in os.listdir("/tmp"):
+                    if f.endswith(".data.json"):
+                        data_file = f"/tmp/{f}"
+                        break
+        if data_file and os.path.exists(data_file):
+            with open(data_file) as f:
+                data = json.load(f)
+        else:
+            print(f"❌ 找不到评论数据文件（已尝试: {data_file}）。请先运行 --count 模式输出到文件", file=sys.stderr)
             sys.exit(1)
+
+        # 合并：用 comment_ids 解析出完整评论对象
+        arguments = resolve_arguments(data, analysis)
+
+        # 冗余校验
+        analysis_title = analysis.get("video", {}).get("title", "")
+        if analysis_title and analysis_title != data["video"]["title"]:
+            print(f"⚠️ 论点 BVID（{analysis.get('bvid','?')}）与数据 BVID（{data['video']['bvid']}）不一致，继续尝试", file=sys.stderr)
+
         title = data["video"]["title"]
         bvid = data["video"]["bvid"]
         owner = data["video"]["owner"]
         likes = str(data["video"]["likes"])
         fetched = len(data["comments"])
-        arguments = data["arguments"]
         html = generate_html(title, owner, bvid, likes, fetched, arguments)
         url = publish_to_repo(html, f"{bvid}.html", bvid)
         print(url)
         sys.exit(0)
 
-    # 原有模式：加载评论数据，输出 JSON
+    # 原有模式：加载评论数据 + 视频信息，输出 JSON（写文件供后续步骤使用）
     import urllib.request as ureq
     vi = json.loads(ureq.urlopen(ureq.Request(f"https://api.bilibili.com/x/web-interface/view?bvid={args.bvid}",
         headers={"User-Agent":"Mozilla/5.0"}),timeout=10).read().decode()).get("data",{})
@@ -193,4 +247,11 @@ if __name__ == "__main__":
     comments = load_comments(aid, max_top=args.count)
     if not comments:
         print(json.dumps({"error":"No comments found"})); sys.exit(1)
-    print(json.dumps({"video":{"title":title,"bvid":args.bvid,"owner":owner,"likes":likes},"comments":comments},ensure_ascii=False))
+    result = {"video":{"title":title,"bvid":args.bvid,"owner":owner,"likes":likes},"comments":comments}
+
+    # 写文件供 --gen-report 使用
+    data_path = f"/tmp/{args.bvid}.data.json"
+    with open(data_path, "w") as f:
+        json.dump(result, f, ensure_ascii=False)
+    print(f"📝 评论数据已持久化到 {data_path}", file=sys.stderr)
+    print(json.dumps(result, ensure_ascii=False))

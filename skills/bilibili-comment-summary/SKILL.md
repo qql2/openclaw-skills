@@ -62,56 +62,77 @@ python3 ~/.openclaw/workspace/comment_report.py <BVID> --count 60
 
 注意：这一步是**唯一消耗 token 的步骤**。不要写代码、不要调 API，直接在大脑里分析评论数据。
 
-### Step 5: 生成 HTML 报告并发布（exec 管道调用，不耗 LLM token）
-将 Step 4 的分析结果拼成标准 JSON 结构，通过管道传给 `comment_report.py --gen-report`。
-
-#### JSON 构建规则（重要！）
-
-**⚠️ 关键陷阱：中文语境下的引号**
-- `summary` 字段（段落式分析文本）中如果包含中文引用、强调（如 `「环境决定上限」`），必须使用**中文弯引号**（`「」`）或**转义**，不要使用 ASCII 双引号 `"`
-- ASCII 双引号是 JSON 语法字符，在字符串值内出现会破坏 JSON 结构
-- **推荐：用 Python 生成最终 JSON，不要手动拼接**
-
-推荐做法（写入临时文件，然后 pipe）：
-```bash
-python3 << 'PYEOF'
-import json
-# 从 Step 3 的输出加载评论数据
-# ... 构建包含 arguments 的完整 dict ...
-# 用 json.dump 自动处理转义
-json.dump(data, sys.stdout, ensure_ascii=False)
-PYEOF | python3 ~/.openclaw/workspace/comment_report.py --gen-report
-```
-
-#### JSON 格式要求
+#### 输出格式：只输出论点结构，不嵌评论对象
+大模型只需要输出轻量级的论点结构，**不要**把完整的评论对象嵌入 JSON：
 ```json
 {
-  "video": { "title": "...", "bvid": "BV...", "owner": "...", "likes": "12345" },
-  "comments": [ /* Step 3 返回的原始 comments 数组 */ ],
+  "bvid": "BV1PNigB4Ejp",
+  "video": {
+    "title": "视频标题"
+  },
   "arguments": [
     {
       "title": "论点标题",
-      "summary": "段落式分析文本，请使用中文弯引号「」而不是英文双引号",
-      "comments": [
-        { "id": "123", "content": "...", "like": 123, "nickname": "...", "subs": [...], "sub_total": 5 }
-      ]
+      "summary": "段落式分析文本，使用中文弯引号「」而不是英文双引号"",
+      "comment_ids": ["285045241409", "287118376464"]
     }
   ]
 }
 ```
-- `comments` 是原始评论数组（每条带 subs、like、nickname）—— **不需要改结构，直接从 Step 3 的结果中引用**
-- `arguments` 是 LLM 分析产生的论点分组，每条评论归入对应论点
-- 工具自动生成交互式 HTML（JS + CSS 折叠展开）→ 推送到 `qql2/bilibili-tools/reports/`
-- 返回 HTMLPreview 预览链接
+- `comment_ids` 是字符串数组，值从 Step 3 输出的每条评论的 `id` 字段获取
+- **禁止**嵌完整评论对象——程序会帮你合并
+- 这样生成的 JSON 极其轻量，且不会出现引号冲突问题
 
-#### 安全校验（pipe 前验证）
-在 pipe 到 `--gen-report` 之前，先快速验证 JSON 合法性：
+### Step 5: 生成 HTML 报告并发布（exec 管道调用，不耗 LLM token）
+将 Step 4 的分析结果（轻量论点结构：title + summary + comment_ids）传给 `comment_report.py --gen-report`，
+程序会自动合并 Step 3 持久化的评论数据，生成完整 HTML。
+
 ```bash
-python3 -c "import json, sys; json.load(sys.stdin)" < /tmp/report_input.json
-echo "✅ JSON 合法"
+# Step 3 的输出已自动写入 /tmp/<BVID>.data.json
+# Step 4 的 LLM 分析结果通过文件传入：
+echo '<论点分析 JSON>' > /tmp/<BVID>.analysis.json
+
+python3 ~/.openclaw/workspace/comment_report.py --gen-report \
+  --analysis /tmp/<BVID>.analysis.json
 ```
 
-**不再需要 LLM 写 HTML 生成代码**，一次 exec 管道调用完成全部发布。
+程序自动完成：
+1. 读取 `/tmp/<BVID>.data.json`（Step 3 持久化的评论数据）
+2. 读取论点 JSON 中的 `comment_ids`，从评论数据中查找对应评论
+3. 合并生成完整 HTML
+4. 推送到 `qql2/bilibili-tools/reports/`
+5. 返回 HTMLPreview 预览链接
+
+#### 论点分析 JSON 格式（LLM 输出）
+```json
+{
+  "bvid": "BV1PNigB4Ejp",
+  "video": {
+    "title": "视频标题"
+  },
+  "arguments": [
+    {
+      "title": "论点标题",
+      "summary": "段落式分析文本，使用中文弯引号「」而不是英文双引号",
+      "comment_ids": ["285045241409", "287118376464"]
+    }
+  ]
+}
+```
+- `comment_ids` 是字符串数组，对应 Step 3 输出的评论 id
+- **不需要**嵌完整评论对象，程序负责合并
+- `summary` 字段建议使用中文弯引号 `「」` 代替英文 `"`，不过即使用了英文引号也不影响 JSON 结构，因为这里不再拼接嵌对象的大型 JSON
+
+**不再需要 LLM 写 HTML 生成代码，也不再需要构建嵌对象的大型 JSON**，一次简单的文件 pipe 完成全部发布。
+
+#### BVID 不一致时怎么办
+如果 Step 4 的论点 JSON 中 `bvid` 与 Step 3 持久化的文件不匹配，程序会报警告但继续尝试。
+你可以显式指定数据文件：
+```bash
+python3 ~/.openclaw/workspace/comment_report.py --gen-report \
+  --analysis /tmp/analysis.json \
+  --data /tmp/BVxxx.data.json
+```
 
 ### Step 6: 测量本次任务 Token 消耗
 
