@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+._*
+
+# OpenClaw internal state
+.clawmetry-*
+.openclaw/
+
+# workspace temp files
+memory/
+lark-auth-qr.png
+bilibili_quality_search.py
+bilibili_quality_React_*.json
+bilibili-tools/
+Style 2D/
+hallucination-mitigation-plan.md
+programmer-info-sources.md
+openclaw-workspace-state.json
+open-design/
