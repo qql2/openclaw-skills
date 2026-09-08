@@ -142,6 +142,8 @@ grep -ri "关键字" /Users/Admin1/Documents/ob/笔记/ --include="*.md" -l 2>/d
 - 用户知识库路径：`/Users/Admin1/Documents/ob/`
 - 用户 Telegram ID（用于通知）：`telegram:6615404038`
 - 如果用户是从其他软件（如 TickTick）归档，参考 `归档ticktick内容.md` 规范
+- **禁止**修改用户已有的 `.obsidian/` 配置文件和插件目录
+- **禁止**删除用户原有笔记（除非用户明确要求）
 - 归档完成后，如果用户是通过 Telegram 发出的指令，回复确认信息即可
 - **禁止**修改用户已有的 `.obsidian/` 配置文件和插件目录
 - **禁止**删除用户原有笔记（除非用户明确要求）
